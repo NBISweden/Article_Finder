@@ -1,0 +1,41 @@
+include_terms:
+  - uppmax
+  - dardel
+  - naiss
+  - snic
+  - nbis
+  - "National Bioinformatics Infrastructure Sweden"
+  - "Uppsala Multidisciplinary Center for Advanced Computational Science"
+  - "National Academic Infrastructure for Supercomputing in Sweden"
+  - "Swedish National Infrastructure for Computing"
+  - "Support for Computational Resources"
+  - "SCoRe"
+  
+exclude_terms:
+  - nuclear
+  - engineering
+  - finance
+  - material
+  - neutrino
+  - polyme
+  - physic
+  - astro
+  - geol
+  - meteo
+  - chemistry
+  - math
+  - relation
+  
+
+exclude_terms_category:
+  - nuclear
+  - finance
+  - neutrino
+  - physic
+  - astro
+  - geol
+  - meteo
+  - math
+  - relation
+
+#context_terms:
