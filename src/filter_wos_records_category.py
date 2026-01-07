@@ -38,7 +38,7 @@ if normal_terms:
 else:
     NORMAL_INCLUDE_REGEX = re.compile(r"a^")  
 
-SCORE_REGEX = re.compile(r"(?<!\w)SCoRe(?!\w)")  # case-sensitive
+SCORE_REGEX = re.compile(r"(?<!\w)SCoRe(?!\w)") if "SCoRe" in include_terms else re.compile(r"a^")  # case-sensitive
 
 if exclude_terms:
     EXCLUDE_REGEX = re.compile("|".join(map(re.escape, exclude_terms)), re.IGNORECASE)
@@ -123,6 +123,8 @@ include_only = df[df["include_match"]]
 
 filtered = df[df["include_match"] & ~df["exclude_match"] & ~df["exclude_category_match"]]
 
+df_exclude = df[~df["exclude_match"] & ~df["exclude_category_match"]].copy()
+
 print(f"Total INCLUDE matches: {len(include_only)}")
 print(f"Excluded due to EXCLUSION terms (main text): {df['exclude_match'].sum()}")
 print(f"Excluded due to CATEGORY exclusions: {df['exclude_category_match'].sum()}")
@@ -134,11 +136,11 @@ print(f"\nSaved keyword_filtered file:\n- {Results}\n")
 
 # 4) Load PI names
 
-pi_path = Path(PI) if PI and str(PI).strip else None
+pi_path = Path(PI) if PI and str(PI).strip() else None
 if pi_path and pi_path.is_file():
-    df_pi= filtered.copy()
+    df_pi= df_exclude.copy()
 
-    pi_df = pd.read_csv(PI, sep=",")
+    pi_df = pd.read_csv(PI, sep=";")
     if "Name" not in pi_df.columns:
         raise ValueError('PI file must contain a column named "Name".')
 
