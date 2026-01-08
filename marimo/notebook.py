@@ -9,7 +9,8 @@ def _():
     import pandas as pd
     import re
     import yaml
-    return pd, re, yaml
+    from pathlib import Path
+    return pd, re, yaml, Path
 
 
 @app.cell
@@ -51,7 +52,7 @@ def _(exclude_terms, include_terms, re):
     else:
         NORMAL_INCLUDE_REGEX = re.compile(r"a^")  
 
-    SCORE_REGEX = re.compile(r"(?<!\w)SCoRe(?!\w)")  # case-sensitive
+    SCORE_REGEX = re.compile(r"(?<!\w)SCoRe(?!\w)") if "SCoRe" in include_terms else re.compile(r"a^") # case-sensitive
 
     if exclude_terms:
         EXCLUDE_REGEX = re.compile("|".join(map(re.escape, exclude_terms)), re.IGNORECASE)
@@ -118,6 +119,7 @@ def _(WOS, pd):
 def _(
     EXCLUDE_CATEGORY_REGEX,
     EXCLUDE_REGEX,
+    Results,
     df,
     extract_include_phrase,
     extract_include_sentence,
@@ -141,100 +143,93 @@ def _(
     df.loc[inc_mask, 'matched_term'] = df.loc[inc_mask, 'fulltext'].apply(extract_include_phrase)
     df.loc[inc_mask, 'matched_sentence'] = df.loc[inc_mask, 'fulltext'].apply(extract_include_sentence)
     include_only = df[df['include_match']]
-    _filtered = df[df['include_match'] & ~df['exclude_match'] & ~df['exclude_category_match']]
+    filtered = df[df['include_match'] & ~df['exclude_match'] & ~df['exclude_category_match']]
+    df_exclude = df[~df["exclude_match"] & ~df["exclude_category_match"]].copy()
     print(f'Total INCLUDE matches: {len(include_only)}')
     print(f"Excluded due to EXCLUSION terms (main text): {df['exclude_match'].sum()}")
     print(f"Excluded due to CATEGORY exclusions: {df['exclude_category_match'].sum()}")
-    print(f'FINAL kept: {len(_filtered)}')
-    return
+    print(f'FINAL kept: {len(filtered)}')
+    
+    filtered.to_csv(Results, index=False)
+    print(f"\nSaved keyword_filtered file:\n- {Results}\n")
+    return (df_exclude,)
 
 
 @app.cell
-def _(PI, pd):
-    pi_df = pd.read_csv(PI, sep=";")
-    if "Name" not in pi_df.columns:
-        raise ValueError('PI file must contain a column named "Name".')
+def _(PI, PI_Checked, Path, dedupe_keep_order, df_exclude, pd, re):
+    pi_path = Path(PI) if PI and str(PI).strip() else None
+    if pi_path and pi_path.is_file():
+        df_pi= df_exclude.copy()
 
-    pi_names = (
-        pi_df["Name"]
-        .dropna()
-        .astype(str)
-        .str.strip()
-    )
-    pi_names = [n for n in pi_names if n]
-    pi_names = sorted(set(pi_names), key=len, reverse=True)
-    return (pi_names,)
+        pi_df = pd.read_csv(PI, sep=";")
+        if "Name" not in pi_df.columns:
+            raise ValueError('PI file must contain a column named "Name".')
 
-
-@app.cell
-def _(dedupe_keep_order, pi_names, re):
-    # Stage 1: last-name filter
-    def get_lastname(name: str) -> str:
-        parts = re.split(r"\s+", name.strip())
-        return parts[-1] if parts else ""
-
-    pi_lastnames = sorted(set(get_lastname(n) for n in pi_names if get_lastname(n)), key=len, reverse=True)
-
-    if pi_lastnames:
-        LASTNAME_REGEX = re.compile(
-            r"(?<!\w)(?:" + "|".join(map(re.escape, pi_lastnames)) + r")(?!\w)",
-            re.IGNORECASE
+        pi_names = (
+            pi_df["Name"]
+            .dropna()
+            .astype(str)
+            .str.strip()
         )
+        pi_names = [n for n in pi_names if n]
+        pi_names = sorted(set(pi_names), key=len, reverse=True)
 
-    else:
-        LASTNAME_REGEX = re.compile(r"a^")  # matches nothing
+
+
+    # Stage 1: last-name filter
+        def get_lastname(name: str) -> str:
+            parts = re.split(r"\s+", name.strip())
+            return parts[-1] if parts else ""
+
+        pi_lastnames = sorted(set(get_lastname(n) for n in pi_names if get_lastname(n)), key=len, reverse=True)
+
+        if pi_lastnames:
+            LASTNAME_REGEX = re.compile(
+                r"(?<!\w)(?:" + "|".join(map(re.escape, pi_lastnames)) + r")(?!\w)",
+                re.IGNORECASE
+            )
+
+        else:
+            LASTNAME_REGEX = re.compile(r"a^")  # matches nothing
 
     # Stage 2: full-name extraction
-    def name_to_pattern(name: str) -> str:
-        parts = re.split(r"\s+", name.strip())
-        return r"(?<!\w)" + r"[\s\-]+".join(map(re.escape, parts)) + r"(?!\w)"
+        def name_to_pattern(name: str) -> str:
+            parts = re.split(r"\s+", name.strip())
+            return r"(?<!\w)" + r"[\s\-]+".join(map(re.escape, parts)) + r"(?!\w)"
 
-    if pi_names:
-        PI_REGEX = re.compile("|".join(name_to_pattern(n) for n in pi_names), re.IGNORECASE)
+        if pi_names:
+            PI_REGEX = re.compile("|".join(name_to_pattern(n) for n in pi_names), re.IGNORECASE)
+        else:
+            PI_REGEX = re.compile(r"a^")
+
+        def find_pi_names_full(text: str):
+            if not isinstance(text, str) or not text.strip():
+                return ""
+            hits = PI_REGEX.findall(text)
+            hits = dedupe_keep_order([h.strip() for h in hits])
+            return "; ".join(hits)
+
+
+
+        fund_cols_candidates = ["FundingText", "FundingAgencies", "GrantNumbers"]
+        fund_cols = [c for c in fund_cols_candidates if c in df_pi.columns]
+
+        if fund_cols:
+            df_pi["funding_search_text"] = df_pi[fund_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        else:
+            df_pi["funding_search_text"] = ""
+
+        df_pi["pi_names_in_funding"] = ""
+        cand_fund = df_pi["funding_search_text"].str.contains(LASTNAME_REGEX, na=False)
+        df_pi.loc[cand_fund, "pi_names_in_funding"] = df_pi.loc[cand_fund, "funding_search_text"].apply(find_pi_names_full)
+        df_pi["pi_in_funding"] = df_pi["pi_names_in_funding"].str.len() > 0
+
+        PI_checked = df_pi[df_pi["pi_in_funding"] ]
+        PI_checked.to_csv(PI_Checked, index=False)
+
+        print(f"Saved PI_checked file:\n- {PI_Checked}\n")
     else:
-        PI_REGEX = re.compile(r"a^")
-
-    def find_pi_names_full(text: str):
-        if not isinstance(text, str) or not text.strip():
-            return ""
-        hits = PI_REGEX.findall(text)
-        hits = dedupe_keep_order([h.strip() for h in hits])
-        return "; ".join(hits)
-    return LASTNAME_REGEX, find_pi_names_full
-
-
-@app.cell
-def _(LASTNAME_REGEX, df, find_pi_names_full):
-    fund_cols_candidates = ["FundingText", "FundingAgencies", "GrantNumbers"]
-    fund_cols = [c for c in fund_cols_candidates if c in df.columns]
-
-    if fund_cols:
-        df["funding_search_text"] = df[fund_cols].fillna("").astype(str).agg(" ".join, axis=1)
-    else:
-        df["funding_search_text"] = ""
-
-
-
-    df["pi_names_in_funding"] = ""
-
-
-    cand_fund = df["funding_search_text"].str.contains(LASTNAME_REGEX, na=False)
-
-
-    df.loc[cand_fund, "pi_names_in_funding"] = df.loc[cand_fund, "funding_search_text"].apply(find_pi_names_full)
-
-
-    df["pi_in_funding"] = df["pi_names_in_funding"].str.len() > 0
-    return
-
-
-@app.cell
-def _(PI_Checked, Results, df):
-    _filtered = df[df['include_match'] & ~df['exclude_match'] & ~df['exclude_category_match']]
-    _filtered.to_csv(Results, index=False)
-    PI_checked = df[df['pi_in_funding']]
-    PI_checked.to_csv(PI_Checked, index=False)
-    print(f'\nSaved:\n- {Results}\n- {PI_Checked}\n')
+        print(f"PI check skipped")
     return
 
 
