@@ -6,6 +6,8 @@ platforms = ["osx-arm64","osx-64","linux-64","win-64"]
 version = "0.1.0"
 
 [tasks]
+finder = "marimo run marimo/notebook.py"
+edit   = "marimo edit marimo/notebook.py"
 
 [dependencies]
 python = "3.12.*"
@@ -16,3 +18,4 @@ requests = ">=2.31"
 python-dotenv = ">=1.0"
 pyyaml = ">=6.0"
 marimo = ">=0.19.2, <0.20"
+ruff = ">=0.14.11, <0.15"
