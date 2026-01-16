@@ -1,0 +1,51 @@
+name: CI (Windows + macOS + Linux)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  run-testdata:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.9.3
+
+      - name: Install dependencies (from pixi.lock)
+        run: pixi install
+
+      # Copy your committed test dataset into the default filenames expected by the script
+      - name: Prepare test inputs (copy from data/)
+        run: >
+          pixi run python -c
+          "from pathlib import Path; import shutil;
+          src_wos=Path('data/wos_results.csv');
+          src_kw=Path('configs/keyword.yml');
+          src_pi=Path('data/Pi_list.csv');
+          assert src_wos.is_file(), f'Missing {src_wos}';
+          assert src_kw.is_file(), f'Missing {src_kw}';
+          assert src_pi.is_file(), f'Missing {src_pi}';
+          shutil.copyfile(src_wos, 'wos_results.csv');
+          shutil.copyfile(src_kw, 'keyword.yml');
+          shutil.copyfile(src_pi, 'Pi_list.csv');
+          print('Test inputs copied OK');"
+
+      - name: Run script on test dataset
+        run: pixi run python src/filter_wos_records_category.py
+
+      - name: Verify outputs were created
+        run: >
+          pixi run python -c
+          "from pathlib import Path;
+          assert Path('filtered_results.csv').is_file(), 'filtered_results.csv not created';
+          assert Path('pi_names_checked.csv').is_file(), 'pi_names_checked.csv not created';
+          print('OK: outputs created');"
