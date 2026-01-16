@@ -6,9 +6,9 @@ from pathlib import Path
 # SETTINGS
 
 
-WOS = r"wos_results.csv"        # Fetched WoS file
-PI  = r"Pi_list.csv"    # PI list file (with column "Name")
-Keyword_File = r"keyword.yml"
+WOS = r"data/wos_results.csv"        # Fetched WoS file
+PI  = r"data/Pi_list.csv"    # PI list file (with column "Name")
+Keyword_File = r"configs/keyword.yml"
 Results  = "filtered_results.csv"
 PI_Checked = "pi_names_checked.csv"
 
