@@ -26,16 +26,6 @@ cd Article_Finder
 pixi install
 ```
 
-## Quick start (run the included test dataset)
-
-The filtering script expects these filenames in the repo root:
-
-- `wos_results.csv`
-- `keyword.yml`
-- `Pi_list.csv` (optional)
-
-
-
 ## Script 1: Filter WoS records 
 
 ### When to use
@@ -48,7 +38,7 @@ Use `src/filter_wos_records_category.py` if you already have a WoS export (CSV) 
 If you don’t have a WoS export, use src/fetch_wos_data.py (Script 2) to fetch data from the WoS API or export the data manually from the WoS website.
 
 ### Run
-The script expects these files in the **current working directory** (repo root):
+The script expects these files:
 - `wos_results.csv` (WoS export)
 - `keyword.yml` (keyword rules)
 - `Pi_list.csv` (optional PI list)
