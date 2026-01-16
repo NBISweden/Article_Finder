@@ -5,7 +5,6 @@ from pathlib import Path
 
 # SETTINGS
 
-
 WOS = r"data/wos_results.csv"        # Fetched WoS file
 PI  = r"data/Pi_list.csv"    # PI list file (with column "Name")
 Keyword_File = r"configs/keyword.yml"
