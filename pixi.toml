@@ -6,16 +6,17 @@ platforms = ["osx-arm64","osx-64","linux-64","win-64"]
 version = "0.1.0"
 
 [tasks]
-finder = "marimo run marimo/notebook.py"
-edit   = "marimo edit marimo/notebook.py"
+ui      = "marimo run apps/article_finder_ui.py"
+ui-edit = "marimo edit apps/article_finder_ui.py"
 
 [dependencies]
-python = "3.12.*"
+python = ">=3.14.3,<3.15"
+keyring = ">=25.7.0,<26"
 
 [pypi-dependencies]
-pandas = ">=2.0"
-requests = ">=2.31"
-python-dotenv = ">=1.0"
-pyyaml = ">=6.0"
-marimo = ">=0.19.2, <0.20"
-ruff = ">=0.14.11, <0.15"
+pandas = ">=3.0.1, <4"
+requests = ">=2.32.5, <3"
+python-dotenv = ">=1.2.2, <2"
+pyyaml = ">=6.0.3, <7"
+marimo = ">=0.21.0, <0.22"
+ruff = ">=0.15.6, <0.16"

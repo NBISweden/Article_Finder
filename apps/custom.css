@@ -1,0 +1,65 @@
+
+[data-testid="app-root"], main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.25rem 1rem;
+}
+
+h1 {
+  font-size: 3rem !important;
+  line-height: 1.1 !important;
+  letter-spacing: -0.02em;
+  margin: 0.25rem 0 1.25rem 0 !important;
+}
+[role="tablist"] [role="tab"] {
+  font-size: 1.35rem !important;
+  font-weight: 700 !important;
+  padding: 0.65rem 1.05rem !important;
+  border-radius: 0.9rem !important;
+}
+[role="tablist"] [role="tab"] * {
+  font-size: inherit !important;
+}
+
+input, select, textarea {
+  font-size: 1.05rem !important;
+  border-radius: 0.85rem !important;
+}
+
+label {
+  font-weight: 600;
+}
+
+button {
+  border-radius: 0.9rem !important;
+  font-weight: 400 !important;
+}
+button * {
+  font-weight: 400 !important;
+}
+button[type="submit"] {
+  font-size: 1.1rem !important;
+  padding: 0.65rem 1.1rem !important;
+}
+
+hr {
+  opacity: 0.35;
+  margin: 1rem 0;
+}
+
+form pre {
+  font-weight: 700 !important;
+}
+
+form p:has(+ * input[type="file"]),
+form p:has(+ label input[type="file"]),
+form p:has(+ div input[type="file"]) {
+  font-weight: 700 !important;
+}
+
+form :where(label, div, span):has(input[type="file"]) button,
+form :where(label, div, span):has(input[type="file"]) button *,
+form input[type="file"] + button,
+form input[type="file"] + button * {
+  font-weight: 400 !important;
+}
