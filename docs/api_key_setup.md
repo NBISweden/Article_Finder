@@ -51,22 +51,20 @@ This can increase the risk of accidental exposure, especially if:
 Run:
 
 ```bash
-pixi run python -m keyring set wos_api default
+pixi run python -c "import keyring; from getpass import getpass; keyring.set_password('wos_api','default', getpass('Enter WoS API key: ')); print('saved')"
 ```
 
 You will be prompted to enter the Web of Science API key.
 
 Paste the key and press Enter.
 
-### Step 2 — Verify that it was saved
+### Step 2 — Verify that it was saved correctly
 
 Run:
 
 ```bash
-pixi run python -m keyring get wos_api default
+pixi run python -c "import keyring; v=keyring.get_password('wos_api','default'); print('exists:', bool(v), 'length:', len(v) if v else 0)"
 ```
-
-If the key was saved correctly, this command will return the stored value.
 
 ### Step 3 — Start the interface
 
