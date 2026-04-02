@@ -129,8 +129,6 @@ In the interface:
 
 - `0` means no limit
 
-If provided to the fetch function, it must be greater than 0.
-
 ### `use_cache`
 
 Controls whether previous outputs are reused for the same pipeline configuration.
