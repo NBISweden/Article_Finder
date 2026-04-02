@@ -2,11 +2,11 @@ import os
 import keyring
 from keyring.errors import KeyringError
 from dotenv import load_dotenv
-import marimo as mo
 
 load_dotenv()
 
-def get_wos_api_key():
+
+def get_wos_api_key() -> str:
     api_key = None
 
     try:
@@ -17,9 +17,9 @@ def get_wos_api_key():
     if not api_key:
         api_key = os.getenv("WOS_API_KEY")
 
-    mo.stop(
-        not api_key,
-        mo.md("Missing API Key. Please read the Secrets Management guide in the README")
-    )
+    if not api_key:
+        raise RuntimeError(
+            "Missing API key. Set WOS_API_KEY in .env or store it in keyring."
+        )
 
     return api_key

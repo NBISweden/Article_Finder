@@ -123,6 +123,7 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callab
             emit("fetch_query_start", usr_query=cfg.usr_query)
             cmd = [
                 sys.executable,
+                "-u",
                 str(repo_root / "scripts" / "fetch_wos_query.py"),
                 "--usr-query", cfg.usr_query,
                 "--out-dir", str(run_dir),
@@ -144,7 +145,11 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callab
             _stream_cmd(cmd, cwd=repo_root, on_line=lambda s: emit("log", line=s))
             emit("fetch_query_done", csv=str(fetched_csv_query))
         
+
         artifacts["output_csv"] = str(fetched_csv_query)
+        artifacts["partial_csv"] = str(run_dir / "wos_results.partial.csv")
+        artifacts["records_jsonl"] = str(run_dir / "records_full.jsonl")
+        artifacts["debug_first_page"] = str(run_dir / "debug_first_page.json")
        
 
     # MODE 2: FETCH DOI
@@ -169,10 +174,8 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callab
             _stream_cmd(cmd, cwd=repo_root, on_line=lambda s: emit("log", line=s))
             emit("fetch_doi_done", csv=str(fetched_csv_doi))
 
-        artifacts["output_csv"] = str(fetched_csv_doi)
-        
+        artifacts["output_csv"] = str(fetched_csv_doi)            
 
-  
     # MODE 3: FILTER 
     
     elif cfg.mode == Mode.FILTER:
