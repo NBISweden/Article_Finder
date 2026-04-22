@@ -13,15 +13,15 @@ from typing import Optional, Callable
 
 
 class Mode(str, Enum):
-    FETCH_QUERY = "fetch_query"       
-    FETCH_DOI = "fetch_doi"          
-    FILTER = "filter"      
+    FETCH_QUERY = "fetch_query"
+    FETCH_DOI = "fetch_doi"
+    FILTER = "filter"
 
 
 @dataclass(frozen=True)
 class PipelineConfig:
     mode: Mode
-    
+
     runs_dir: str = "runs"
     use_cache: bool = True
     sleep: float = 0.25
@@ -31,8 +31,8 @@ class PipelineConfig:
     database_id: str = "WOS"
     page_size: int = 100
     max_records: int | None = None
-    start_date: str | None = None  
-    end_date: str | None = None    
+    start_date: str | None = None
+    end_date: str | None = None
 
     # Mode 2: Fetch DOI settings
     doi_list_path: str | None = None
@@ -41,7 +41,10 @@ class PipelineConfig:
     input_wos_csv: str | None = None
     keywords_yml: str | None = None
     Contributor_csv: str | None = None
+    do_keyword_filter: bool = True
     do_Contributor_check: bool = True
+    do_merge_results: bool = False
+    fuzzy_threshold: int = 95
 
 
 def _utc_now() -> str:
@@ -63,23 +66,23 @@ def _stream_cmd(cmd: list[str], cwd: Path, on_line: Optional[Callable[[str], Non
         text=True,
         bufsize=1,
     )
-    
+
     output_lines = []
     assert p.stdout is not None
-    
+
     for line in p.stdout:
         line = line.rstrip("\n")
         output_lines.append(line)
         if on_line:
             on_line(line)
-            
+
     rc = p.wait()
     if rc != 0:
         error_context = "\n".join(output_lines[-10:]) if output_lines else "No output captured."
         raise RuntimeError(f"Command failed (code={rc}).\nLast output:\n{error_context}")
 
 
-def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callable[[dict], None]] = None) -> dict:
+def run_pipeline(cfg: PipelineConfig, repo_root: Path) -> dict:
     repo_root = repo_root.resolve()
     run_id = _hash_cfg(cfg)
     run_dir = (repo_root / cfg.runs_dir / f"{cfg.mode.value}_{run_id}").resolve()
@@ -90,8 +93,6 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callab
 
     def emit(event_type: str, **data):
         payload = {"type": event_type, "ts": _utc_now(), **data}
-        if on_event:
-            on_event(payload)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
@@ -101,6 +102,7 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callab
     fetched_csv_doi = run_dir / "wos_results_by_doi.csv"
     filtered_csv = run_dir / "filtered_results.csv"
     Contributor_checked_csv = run_dir / "Contributor_names_checked.csv"
+    merged_csv = run_dir / "merged_results.csv"
 
     artifacts = {
         "run_dir": str(run_dir),
@@ -108,9 +110,6 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callab
         "manifest": str(manifest_path),
     }
 
-    
-    # MODE 1: FETCH QUERY 
-  
     if cfg.mode == Mode.FETCH_QUERY:
         if not cfg.usr_query:
             raise ValueError("FETCH_QUERY mode requires 'usr_query'.")
@@ -131,28 +130,22 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callab
                 "--page-size", str(cfg.page_size),
                 "--sleep", str(cfg.sleep),
                 "--summary-csv", str(fetched_csv_query),
-                
             ]
-            
-           
+
             if cfg.start_date:
                 cmd += ["--start-date", cfg.start_date]
             if cfg.end_date:
                 cmd += ["--end-date", cfg.end_date]
             if cfg.max_records is not None:
                 cmd += ["--max-records", str(cfg.max_records)]
-            
+
             _stream_cmd(cmd, cwd=repo_root, on_line=lambda s: emit("log", line=s))
             emit("fetch_query_done", csv=str(fetched_csv_query))
-        
 
         artifacts["output_csv"] = str(fetched_csv_query)
         artifacts["partial_csv"] = str(run_dir / "wos_results.partial.csv")
         artifacts["records_jsonl"] = str(run_dir / "records_full.jsonl")
         artifacts["debug_first_page"] = str(run_dir / "debug_first_page.json")
-       
-
-    # MODE 2: FETCH DOI
 
     elif cfg.mode == Mode.FETCH_DOI:
         if not cfg.doi_list_path:
@@ -174,44 +167,61 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path, on_event: Optional[Callab
             _stream_cmd(cmd, cwd=repo_root, on_line=lambda s: emit("log", line=s))
             emit("fetch_doi_done", csv=str(fetched_csv_doi))
 
-        artifacts["output_csv"] = str(fetched_csv_doi)            
+        artifacts["output_csv"] = str(fetched_csv_doi)
 
-    # MODE 3: FILTER 
-    
     elif cfg.mode == Mode.FILTER:
         if not cfg.input_wos_csv:
             raise ValueError("FILTER mode requires 'input_wos_csv'.")
-        if not cfg.keywords_yml:
-            raise ValueError("FILTER mode requires 'keywords_yml'.")
-        
+
+        if not cfg.do_keyword_filter and not cfg.do_Contributor_check:
+            raise ValueError("Enable at least one filter: keyword search or name check.")
+
+        if cfg.do_keyword_filter and not cfg.keywords_yml:
+            raise ValueError("Keyword search is enabled, but 'keywords_yml' is missing.")
+
         input_csv_path = Path(cfg.input_wos_csv).resolve()
         if not input_csv_path.exists():
-             raise FileNotFoundError(f"Input file not found: {input_csv_path}")
+            raise FileNotFoundError(f"Input file not found: {input_csv_path}")
 
         emit("filter_start", input_csv=str(input_csv_path))
 
         Contributor_csv_arg = cfg.Contributor_csv if (cfg.do_Contributor_check and cfg.Contributor_csv) else ""
         out_Contributor_checked_arg = str(Contributor_checked_csv) if (cfg.do_Contributor_check and cfg.Contributor_csv) else ""
+        out_merged_arg = str(merged_csv) if cfg.do_merge_results else ""
 
         filter_cmd = [
             sys.executable,
             str(repo_root / "scripts" / "filter_wos_records.py"),
             "--wos", str(input_csv_path),
-            "--keywords", str(Path(cfg.keywords_yml).resolve()),
             "--out", str(filtered_csv),
         ]
+
+        if cfg.keywords_yml:
+            filter_cmd += ["--keywords", str(Path(cfg.keywords_yml).resolve())]
+        if not cfg.do_keyword_filter:
+            filter_cmd += ["--no-keyword-filter"]
         if Contributor_csv_arg:
             filter_cmd += ["--Contributor", str(Path(Contributor_csv_arg).resolve())]
         if out_Contributor_checked_arg:
             filter_cmd += ["--out-Contributor-checked", out_Contributor_checked_arg]
+        if out_merged_arg:
+            filter_cmd += ["--out-merged", out_merged_arg]
+        filter_cmd += ["--fuzzy-threshold", str(cfg.fuzzy_threshold)]
 
         _stream_cmd(filter_cmd, cwd=repo_root, on_line=lambda s: emit("log", line=s))
-        
-        artifacts["filtered_csv"] = str(filtered_csv)
+
+        if cfg.do_keyword_filter:
+            artifacts["filtered_csv"] = str(filtered_csv)
+            artifacts["keyword_filtered_csv"] = str(filtered_csv)
+
         if out_Contributor_checked_arg:
             artifacts["Contributor_checked_csv"] = str(Contributor_checked_csv)
-        
-        emit("filter_done", filtered_csv=str(filtered_csv))
+            artifacts["name_checked_csv"] = str(Contributor_checked_csv)
+
+        if out_merged_arg:
+            artifacts["merged_csv"] = str(merged_csv)
+
+        emit("filter_done", filtered_csv=str(filtered_csv) if cfg.do_keyword_filter else "")
 
     else:
         raise ValueError(f"Unknown mode: {cfg.mode}")

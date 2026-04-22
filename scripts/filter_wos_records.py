@@ -1,6 +1,9 @@
 import argparse
 import re
 from pathlib import Path
+import multiprocessing
+import numpy as np 
+from rapidfuzz import fuzz 
 
 import pandas as pd
 import yaml
@@ -75,35 +78,30 @@ def load_keywords(keyword_file: str):
         include_category_regex,
     )
 
-
-def include_match(text: str, normal_include_regex: re.Pattern, score_regex: re.Pattern) -> bool:
-
-    if normal_include_regex.pattern == r"a^" and score_regex.pattern == r"a^":
-        return True
-
-    if not isinstance(text, str):
-        return False
-    return bool(score_regex.search(text) or normal_include_regex.search(text))
-
-
-def extract_include_phrase(text: str, normal_include_regex: re.Pattern, score_regex: re.Pattern):
-    if not isinstance(text, str):
-        return ""
-    m = score_regex.search(text)
-    if m:
-        return m.group(0)
-    m2 = normal_include_regex.search(text)
-    return m2.group(0) if m2 else ""
-
-
-def extract_include_sentence(text: str, normal_include_regex: re.Pattern, score_regex: re.Pattern):
+def extract_include_sentence(
+    text: str,
+    normal_include_regex: re.Pattern,
+    score_regex: re.Pattern,
+    include_terms: list[str] | None = None,
+    use_fuzzy: bool = True,
+    fuzzy_threshold: int = 95,
+):
     if not isinstance(text, str):
         return ""
     sentences = re.split(r"(?<=[.!?])\s+", text)
     for s in sentences:
         if score_regex.search(s) or normal_include_regex.search(s):
             return s.strip()
+        if use_fuzzy and include_terms and fuzzy_include_match(s, include_terms, threshold=fuzzy_threshold):
+            return s.strip()
     return ""
+
+
+def normalize_whitespace(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def norm_simple(s: str) -> str:
     s = (s or "").strip().lower()
@@ -112,6 +110,86 @@ def norm_simple(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+def fuzzy_best_phrase(text: str, include_terms: list[str], threshold: int = 95) -> str:
+    if not isinstance(text, str): return ""
+    text_norm = norm_simple(text)
+    if not text_norm: return ""
+
+    text_tokens = text_norm.split()
+    best_phrase = ""
+    best_score = -1.0
+
+    for term in include_terms:
+        term_norm = norm_simple(term)
+        if not term_norm: continue
+
+        if term_norm in text_norm:
+            return term
+
+        term_tokens = term_norm.split()
+        n = len(term_tokens)
+        min_window = max(1, n - 1)
+        max_window = min(len(text_tokens), n + 1)
+
+        for w in range(min_window, max_window + 1):
+            for i in range(len(text_tokens) - w + 1):
+                cand = " ".join(text_tokens[i:i + w])
+                score = fuzz.ratio(term_norm, cand)
+                if score > best_score:
+                    best_score = score
+                    best_phrase = term
+                if score >= threshold:
+                    return term
+
+    return best_phrase if best_score >= threshold else ""
+
+def process_chunk(chunk_data, normal_include_regex, score_regex, include_terms, fuzzy_threshold):
+    results = [
+        analyze_include_match(t, normal_include_regex, score_regex, include_terms, fuzzy_threshold)
+        for t in chunk_data
+    ]
+    
+    return pd.Series(results, index=chunk_data.index)
+
+def process_chunk_wrapper(args):
+    return process_chunk(*args)
+
+def fuzzy_include_match(text: str, include_terms: list[str], threshold: int = 95) -> bool:
+    return bool(fuzzy_best_phrase(text, include_terms, threshold=threshold))
+
+def analyze_include_match(
+    text: str,
+    normal_include_regex: re.Pattern,
+    score_regex: re.Pattern,
+    include_terms: list[str] | None = None,
+    fuzzy_threshold: int = 95,
+):
+    if not isinstance(text, str) or not text.strip():
+        return False, "", ""
+
+    text = normalize_whitespace(text)
+
+    m = score_regex.search(text)
+    if m:
+        matched_term = m.group(0)
+        matched_sentence = extract_include_sentence(text, normal_include_regex, score_regex, use_fuzzy=False)
+        return True, matched_term, matched_sentence
+
+    m2 = normal_include_regex.search(text)
+    if m2:
+        matched_term = m2.group(0)
+        matched_sentence = extract_include_sentence(text, normal_include_regex, score_regex, use_fuzzy=False)
+        return True, matched_term, matched_sentence
+
+    if include_terms:
+        matched_term = fuzzy_best_phrase(text, include_terms, threshold=fuzzy_threshold)
+        if matched_term:
+            sentences = re.split(r"(?<=[.!?])\s+", text)
+            for s in sentences:
+                if fuzzy_include_match(s, [matched_term], threshold=fuzzy_threshold):
+                    return True, matched_term, s.strip()
+
+    return False, "", ""
 
 def contributor_lastname_candidates(fullname: str, max_words: int = 4) -> set[str]:
     toks = [t for t in re.split(r"\s+", fullname.strip()) if t]
@@ -126,7 +204,6 @@ def contributor_lastname_candidates(fullname: str, max_words: int = 4) -> set[st
 
 
 def parse_author_token(author_token: str):
-
     tok = (author_token or "").strip()
     if not tok:
         return ("", "", "")
@@ -158,7 +235,6 @@ def make_flexible_name_pattern(name: str) -> str:
 
 
 def build_ack_patterns(fullname: str, max_words: int = 4):
-
     fullname = (fullname or "").strip()
     toks = [t for t in re.split(r"\s+", fullname) if t]
     if len(toks) < 2:
@@ -183,15 +259,17 @@ def build_ack_patterns(fullname: str, max_words: int = 4):
 
 def run_filter(
     wos_csv: str,
-    keyword_file: str,
+    keyword_file: str | None,
     out_filtered: str,
     Contributor_csv: str | None = None,
     out_Contributor_checked: str | None = None,
+    out_merged: str | None = None,
+    do_keyword_filter: bool = True,
+    use_fuzzy: bool = True,
+    fuzzy_threshold: int = 95,
 ):
-
-    include_terms, exclude_terms, exclude_terms_category, include_terms_category, NORMAL_INCLUDE_REGEX, SCORE_REGEX, EXCLUDE_REGEX, EXCLUDE_CATEGORY_REGEX, INCLUDE_CATEGORY_REGEX = load_keywords(keyword_file)
-
     df = pd.read_csv(wos_csv, sep=",")
+    df = df.reset_index(drop=True)
     df = df.dropna(axis=1, how="all")
     df = df.loc[:, (df != "").any(axis=0)]
 
@@ -203,56 +281,113 @@ def run_filter(
         and c not in category_cols
     ]
 
-    df["fulltext"] = df[text_cols].fillna("").astype(str).agg(" ".join, axis=1)
+    df["fulltext"] = df[text_cols].fillna("").astype(str).agg(" ".join, axis=1).apply(normalize_whitespace)
 
     if category_cols:
-        df["category_text"] = df[category_cols].fillna("").astype(str).agg(" ".join, axis=1)
+        df["category_text"] = df[category_cols].fillna("").astype(str).agg(" ".join, axis=1).apply(normalize_whitespace)
     else:
         df["category_text"] = ""
-
-    df["include_match"] = df["fulltext"].apply(lambda t: include_match(t, NORMAL_INCLUDE_REGEX, SCORE_REGEX))
-    df["exclude_match"] = df["fulltext"].str.contains(EXCLUDE_REGEX, na=False)
-    df["exclude_category_match"] = df["category_text"].str.contains(EXCLUDE_CATEGORY_REGEX, na=False)
-    df["include_category_match"] = df["category_text"].str.contains(INCLUDE_CATEGORY_REGEX, na=False)
 
     df["matched_term"] = ""
     df["matched_sentence"] = ""
 
-    inc_mask = df["include_match"]
-    df.loc[inc_mask, "matched_term"] = df.loc[inc_mask, "fulltext"].apply(
-        lambda t: extract_include_phrase(t, NORMAL_INCLUDE_REGEX, SCORE_REGEX)
-    )
-    df.loc[inc_mask, "matched_sentence"] = df.loc[inc_mask, "fulltext"].apply(
-        lambda t: extract_include_sentence(t, NORMAL_INCLUDE_REGEX, SCORE_REGEX)
-    )
-
-    include_only = df[df["include_match"]]
-
-    if include_terms_category:
-        keep_cat = df["include_category_match"]
-    else:
-        keep_cat = True
-
-    filtered = df[df["include_match"] & keep_cat & ~df["exclude_match"] & ~df["exclude_category_match"]]
-
-    df_exclude = df[~df["exclude_match"] & ~df["exclude_category_match"]].copy()
-
-    if include_terms:
-        print(f"Total INCLUDE matches: {len(include_only)}")
-    else:
-        print(f"Total INCLUDE matches: {len(include_only)} (include_terms empty -> include step disabled)")
-    print(f"Excluded due to EXCLUSION terms (main text): {int(df['exclude_match'].sum())}")
-    print(f"Excluded due to CATEGORY exclusions: {int(df['exclude_category_match'].sum())}")
-    if include_terms_category:
-        print(f"Included due to CATEGORY inclusion: {int(df['include_category_match'].sum())}")
-    else:
-        print("Included due to CATEGORY inclusion: N/A (include_terms_category empty -> category include disabled)")
-    print(f"FINAL kept: {len(filtered)}")
-
-    Path(out_filtered).parent.mkdir(parents=True, exist_ok=True)
-    filtered.to_csv(out_filtered, index=False)
-
+    keyword_filtered = None
+    keyword_filtered_path = None
+    Contributor_checked = None
     Contributor_checked_path = None
+    merged_path = None
+
+    if keyword_file and str(keyword_file).strip():
+        (
+            include_terms,
+            exclude_terms,
+            exclude_terms_category,
+            include_terms_category,
+            NORMAL_INCLUDE_REGEX,
+            SCORE_REGEX,
+            EXCLUDE_REGEX,
+            EXCLUDE_CATEGORY_REGEX,
+            INCLUDE_CATEGORY_REGEX,
+        ) = load_keywords(keyword_file)
+
+        df["exclude_match"] = df["fulltext"].str.contains(EXCLUDE_REGEX, na=False)
+        df["exclude_category_match"] = df["category_text"].str.contains(EXCLUDE_CATEGORY_REGEX, na=False)
+
+        if do_keyword_filter:
+            print(f"Starting Keyword Filter with Parallel Processing...")
+            
+            num_cores = max(1, multiprocessing.cpu_count() - 1)
+            num_chunks = num_cores * 4
+
+            n = len(df)
+            chunk_size = (n // num_chunks) + 1
+            chunks = [df["fulltext"].iloc[i : i + chunk_size] for i in range(0, n, chunk_size)]
+
+            tasks = [
+                (chunk, NORMAL_INCLUDE_REGEX, SCORE_REGEX, include_terms, fuzzy_threshold) 
+                for chunk in chunks
+            ]
+            
+            results_list = []
+            with multiprocessing.Pool(num_cores) as pool:
+                for i, result_chunk in enumerate(pool.imap(process_chunk_wrapper, tasks), 1):
+                    results_list.append(result_chunk)
+                    percent = (i / len(chunks)) * 100
+                    print(f"Filter Progress: {percent:.1f}% ({i}/{len(chunks)} completed)", flush=True)
+
+            results = pd.concat(results_list).sort_index()
+
+            df["include_match"] = [x[0] for x in results]
+            df["matched_term"] = [x[1] for x in results]
+            df["matched_sentence"] = [x[2] for x in results]
+            df["include_category_match"] = df["category_text"].str.contains(INCLUDE_CATEGORY_REGEX, na=False)
+
+            include_only = df[df["include_match"]]
+
+            if include_terms_category:
+                keep_cat = df["include_category_match"]
+            else:
+                keep_cat = True
+
+            keyword_filtered = df[
+                df["include_match"] & keep_cat & ~df["exclude_match"] & ~df["exclude_category_match"]
+            ].copy()
+
+            if include_terms:
+                print(f"Total INCLUDE matches: {len(include_only)}")
+            else:
+                print(f"Total INCLUDE matches: {len(include_only)} (include_terms empty -> include step disabled)")
+            print(f"Excluded due to EXCLUSION terms (main text): {int(df['exclude_match'].sum())}")
+            print(f"Excluded due to CATEGORY exclusions: {int(df['exclude_category_match'].sum())}")
+            if include_terms_category:
+                print(f"Included due to CATEGORY inclusion: {int(df['include_category_match'].sum())}")
+            else:
+                print("Included due to CATEGORY inclusion: N/A (include_terms_category empty -> category include disabled)")
+            print(f"KEYWORD kept: {len(keyword_filtered)}")
+
+            Path(out_filtered).parent.mkdir(parents=True, exist_ok=True)
+            keyword_filtered.to_csv(out_filtered, index=False)
+            keyword_filtered_path = out_filtered
+        else:
+            df["include_match"] = False
+            df["include_category_match"] = False
+            include_only = pd.DataFrame(columns=df.columns)
+
+            print("Keyword include filter skipped; exclusion rules still applied")
+            print(f"Excluded due to EXCLUSION terms (main text): {int(df['exclude_match'].sum())}")
+            print(f"Excluded due to CATEGORY exclusions: {int(df['exclude_category_match'].sum())}")
+
+        df_exclude = df[~df["exclude_match"] & ~df["exclude_category_match"]].copy()
+
+    else:
+        df["include_match"] = False
+        df["exclude_match"] = False
+        df["exclude_category_match"] = False
+        df["include_category_match"] = False
+        include_only = pd.DataFrame(columns=df.columns)
+        df_exclude = df.copy()
+
+        print("Keyword rules skipped")
 
     if Contributor_csv and str(Contributor_csv).strip() and Path(Contributor_csv).is_file():
         df_Contributor = df_exclude.copy()
@@ -280,14 +415,6 @@ def run_filter(
             reverse=True
         )
 
-        if Contributor_lastnames:
-            LASTNAME_REGEX = re.compile(
-                r"(?<!\w)(?:" + "|".join(map(re.escape, Contributor_lastnames)) + r")(?!\w)",
-                re.IGNORECASE
-            )
-        else:
-            LASTNAME_REGEX = re.compile(r"a^")
-
         contributor_full_lookup = {}
         contributor_initial_lookup = {}
 
@@ -311,7 +438,6 @@ def run_filter(
                     contributor_initial_lookup.setdefault((ln, contributor_fi), set()).add(full)
 
         def find_PI_staff_in_authors(authors_text: str):
-  
             if not isinstance(authors_text, str) or not authors_text.strip():
                 return ("", "")
 
@@ -350,7 +476,6 @@ def run_filter(
             df_Contributor["PI_staff_names_in_authors_paper"] = ""
             df_Contributor["PI_staff_in_authors"] = False
 
-
         contributor_ack_patterns = {}
         for full in Contributor_names:
             full_pat, initial_pats = build_ack_patterns(full, max_words=4)
@@ -360,7 +485,6 @@ def run_filter(
             }
 
         def find_PI_staff_in_ack(text: str):
-            
             if not isinstance(text, str) or not text.strip():
                 return ("", "")
 
@@ -404,7 +528,7 @@ def run_filter(
                 ack_fund_cols.append(c)
 
         if ack_fund_cols:
-            ack_fund_search_text = df_Contributor[ack_fund_cols].fillna("").astype(str).agg(" ".join, axis=1)
+            ack_fund_search_text = df_Contributor[ack_fund_cols].fillna("").astype(str).agg(" ".join, axis=1).apply(normalize_whitespace)
         else:
             ack_fund_search_text = pd.Series("", index=df_Contributor.index)
 
@@ -437,20 +561,77 @@ def run_filter(
         Contributor_checked.to_csv(out_Contributor_checked, index=False)
         Contributor_checked_path = out_Contributor_checked
 
+        if out_merged and str(out_merged).strip():
+            kw_part = keyword_filtered.copy() if keyword_filtered is not None else pd.DataFrame()
+            name_part = Contributor_checked.copy() if Contributor_checked is not None else pd.DataFrame()
+
+            if not kw_part.empty:
+                kw_part["matched_by_keyword"] = True
+                kw_part["matched_by_name"] = False
+
+            if not name_part.empty:
+                name_part["matched_by_keyword"] = False
+                name_part["matched_by_name"] = True
+
+            if not kw_part.empty and not name_part.empty:
+                if "UT" in kw_part.columns and "UT" in name_part.columns:
+                    kw_base = kw_part.drop_duplicates(subset=["UT"], keep="first")
+                    name_base = name_part.drop_duplicates(subset=["UT"], keep="first")
+
+                    kw_ids = set(kw_base["UT"].astype(str))
+                    name_ids = set(name_base["UT"].astype(str))
+
+                    merged = kw_base.set_index("UT").combine_first(name_base.set_index("UT")).reset_index()
+                    merged["matched_by_keyword"] = merged["UT"].astype(str).isin(kw_ids)
+                    merged["matched_by_name"] = merged["UT"].astype(str).isin(name_ids)
+                else:
+                    merged = pd.concat([kw_part, name_part], ignore_index=True, sort=False)
+                    dedupe_cols = [c for c in ["DOI", "Title"] if c in merged.columns]
+                    if dedupe_cols:
+                        merged = merged.drop_duplicates(subset=dedupe_cols, keep="first")
+                    else:
+                        merged = merged.drop_duplicates()
+
+            elif not kw_part.empty:
+                merged = kw_part.copy()
+
+            elif not name_part.empty:
+                merged = name_part.copy()
+
+            else:
+                merged = pd.DataFrame()
+
+            Path(out_merged).parent.mkdir(parents=True, exist_ok=True)
+            merged.to_csv(out_merged, index=False)
+            merged_path = out_merged
+
+            print(f"MERGED kept: {len(merged)}")
+
         print(f"PI/staff matches in ack: {int(df_Contributor['PI_staff_in_ack'].sum())}")
         print(f"PI/staff matches in authors: {int(df_Contributor['PI_staff_in_authors'].sum())}")
-        
+
     else:
+        if out_merged and str(out_merged).strip() and keyword_filtered is not None:
+            merged = keyword_filtered.copy()
+            merged["matched_by_keyword"] = True
+            merged["matched_by_name"] = False
+            Path(out_merged).parent.mkdir(parents=True, exist_ok=True)
+            merged.to_csv(out_merged, index=False)
+            merged_path = out_merged
+            print(f"MERGED kept: {len(merged)}")
+
         print("PI/staff name check skipped")
 
     return {
-        "out_filtered": out_filtered,
+        "out_filtered": keyword_filtered_path,
         "out_Contributor_checked": Contributor_checked_path,
+        "out_merged": merged_path,
         "counts": {
             "include_only": int(len(include_only)),
-            "excluded_main": int(df["exclude_match"].sum()),
-            "excluded_category": int(df["exclude_category_match"].sum()),
-            "final_kept": int(len(filtered)),
+            "excluded_main": int(df["exclude_match"].sum()) if "exclude_match" in df.columns else 0,
+            "excluded_category": int(df["exclude_category_match"].sum()) if "exclude_category_match" in df.columns else 0,
+            "keyword_kept": int(len(keyword_filtered)) if keyword_filtered is not None else 0,
+            "name_kept": int(len(Contributor_checked)) if Contributor_checked is not None else 0,
         }
     }
 
@@ -458,10 +639,13 @@ def run_filter(
 def build_argparser():
     ap = argparse.ArgumentParser(description="Filter WoS CSV using keyword.yml (+ optional Contributor funding/authors/acknowledgment name check).")
     ap.add_argument("--wos", required=True, help="Input WoS summary CSV (comma-separated)")
-    ap.add_argument("--keywords", required=True, help="Path to keyword.yml")
+    ap.add_argument("--keywords", default="", help="Optional path to keyword.yml")
+    ap.add_argument("--no-keyword-filter", action="store_true", help="Disable keyword include filtering")
     ap.add_argument("--out", required=True, help="Filtered CSV output path")
     ap.add_argument("--Contributor", default="", help='Optional Contributor list CSV (separator=";") with column Name')
     ap.add_argument("--out-Contributor-checked", default="", help="Optional Contributor checked output CSV path")
+    ap.add_argument("--out-merged", default="", help="Optional merged output CSV path")
+    ap.add_argument("--fuzzy-threshold", type=int, default=95, help="Fuzzy threshold for include terms, recommended 92-95")
     return ap
 
 
@@ -470,13 +654,19 @@ def main():
 
     Contributor = args.Contributor.strip() if args.Contributor else None
     out_Contributor_checked = args.out_Contributor_checked.strip() if args.out_Contributor_checked else None
+    keywords = args.keywords.strip() if args.keywords else None
+    out_merged = args.out_merged.strip() if args.out_merged else None
 
     run_filter(
         wos_csv=args.wos,
-        keyword_file=args.keywords,
+        keyword_file=keywords,
         out_filtered=args.out,
         Contributor_csv=Contributor,
         out_Contributor_checked=out_Contributor_checked,
+        out_merged=out_merged,
+        do_keyword_filter=not args.no_keyword_filter,
+        use_fuzzy=True,
+        fuzzy_threshold=args.fuzzy_threshold,
     )
 
 

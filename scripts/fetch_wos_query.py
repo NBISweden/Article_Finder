@@ -3,7 +3,7 @@ import json
 import re
 import argparse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import pandas as pd
 from wos_credentials import get_wos_api_key
@@ -52,6 +52,7 @@ def write_jsonl(path: Path, obj: dict):
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+
 def validate_date_range(start_date: str | None, end_date: str | None):
     if bool(start_date) != bool(end_date):
         raise ValueError("Provide both start_date and end_date, or neither.")
@@ -67,6 +68,7 @@ def validate_date_range(start_date: str | None, end_date: str | None):
 
     if start > end:
         raise ValueError("start_date must be earlier than or equal to end_date.")
+
 
 def parse_iso_date(s: str | None):
     s = (s or "").strip()
@@ -86,6 +88,7 @@ def is_within_exact_date_range(sortdate: str, start_date: str, end_date: str) ->
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
     return start <= d <= end
+
 
 def parse_json_response(resp: requests.Response) -> dict:
     content_type = resp.headers.get("Content-Type", "")
@@ -172,6 +175,7 @@ def get_json_with_retry(
 
     raise last_err
 
+
 def get_query_id_and_total(seed_json: dict):
     qr = (seed_json.get("QueryResult") or {})
     total = int(qr.get("RecordsFound", 0) or 0)
@@ -185,6 +189,7 @@ def get_query_id_and_total(seed_json: dict):
 
 def get_unique_id(rec: dict) -> str:
     return rec.get("UID", "") or rec.get("uid", "")
+
 
 def extract_records_any(data):
     for root in [
@@ -374,6 +379,82 @@ def get_author_emails(rec: dict) -> str:
 
     return "; ".join(dedupe_keep_order(emails))
 
+
+def get_affiliations(rec: dict) -> tuple[str, str]:
+    static = rec.get("static_data", {}) or {}
+    summary = static.get("summary", {}) or {}
+    full_md = static.get("fullrecord_metadata", {}) or {}
+
+    addresses_block = (full_md.get("addresses") or {})
+    address_items = as_list(addresses_block.get("address_name"))
+
+    addr_map = {}
+    all_affils = []
+
+    for a in address_items:
+        if not isinstance(a, dict):
+            continue
+
+        spec = a.get("address_spec", {}) or {}
+        addr_no = str(spec.get("addr_no", "")).strip()
+
+        full_address = extract_text(spec.get("full_address"))
+
+        orgs = []
+        org_block = spec.get("organizations", {}) or {}
+        for org in as_list(org_block.get("organization")):
+            if isinstance(org, dict):
+                orgs.append(extract_text(org.get("content") or org))
+            else:
+                orgs.append(extract_text(org))
+
+        suborgs = []
+        suborg_block = spec.get("suborganizations", {}) or {}
+        for sub in as_list(suborg_block.get("suborganization")):
+            suborgs.append(extract_text(sub))
+
+        city = extract_text(spec.get("city"))
+        country = extract_text(spec.get("country"))
+
+        parts = dedupe_keep_order([*orgs, *suborgs, city, country])
+
+        rendered = full_address if full_address else ", ".join([p for p in parts if p])
+        rendered = " ".join(rendered.split()).strip()
+
+        if rendered:
+            all_affils.append(rendered)
+            if addr_no:
+                addr_map[addr_no] = rendered
+
+    all_affils = dedupe_keep_order(all_affils)
+
+    names = as_list((summary.get("names") or {}).get("name"))
+    author_affils = []
+
+    for n in names:
+        if not isinstance(n, dict):
+            continue
+
+        full_name = str(n.get("full_name") or "").strip()
+        addr_no_raw = n.get("addr_no")
+
+        if not full_name:
+            continue
+
+        addr_nos = []
+        if isinstance(addr_no_raw, list):
+            addr_nos = [str(x).strip() for x in addr_no_raw if str(x).strip()]
+        elif addr_no_raw is not None:
+            addr_nos = [x.strip() for x in str(addr_no_raw).replace(";", " ").split() if x.strip()]
+
+        linked = dedupe_keep_order([addr_map[a] for a in addr_nos if a in addr_map])
+
+        if linked:
+            author_affils.append(f"{full_name}: {' | '.join(linked)}")
+
+    return "; ".join(all_affils), "; ".join(author_affils)
+
+
 def make_summary_row(rec: dict) -> dict:
     static = rec.get("static_data", {}) or {}
     summary = static.get("summary", {}) or {}
@@ -383,9 +464,9 @@ def make_summary_row(rec: dict) -> dict:
     title = pick_title(summary, "item")
     journal = pick_title(summary, "source")
 
-    #year = str(pub_info.get("pubyear", "")).strip()
-    #pubmonth = str(pub_info.get("pubmonth", "")).strip()
-    #coverdate = str(pub_info.get("coverdate", "")).strip()
+    pubyear = str(pub_info.get("pubyear", "")).strip()
+    pubmonth = str(pub_info.get("pubmonth", "")).strip()
+    coverdate = str(pub_info.get("coverdate", "")).strip()
     sortdate = str(pub_info.get("sortdate", "")).strip()
 
     authors = (summary.get("names") or {}).get("name")
@@ -404,6 +485,7 @@ def make_summary_row(rec: dict) -> dict:
 
     doi = get_doi(rec)
     emails = get_author_emails(rec)
+    affiliations, author_affiliations = get_affiliations(rec)
     abstract = get_abstract(rec)
 
     funding_text, funding_agencies, grant_numbers = get_funding(rec)
@@ -414,10 +496,15 @@ def make_summary_row(rec: dict) -> dict:
         "UT": ut,
         "Title": title,
         "Journal": journal,
+        "PubYear": pubyear,
+        "PubMonth": pubmonth,
+        "CoverDate": coverdate,
         "SortDate": sortdate,
         "DOI": doi,
         "Authors": authors_str,
         "AuthorEmails": emails,
+        "Affiliations": affiliations,
+        "AuthorAffiliations": author_affiliations,
         "Abstract": abstract,
         "FundingText": funding_text,
         "FundingAgencies": funding_agencies,
@@ -427,6 +514,250 @@ def make_summary_row(rec: dict) -> dict:
         "WoSCategoriesTraditional": cat_trad,
         "WoSCategoriesExtended": cat_ext,
     }
+
+
+def midpoint_date(start_date: str, end_date: str) -> str:
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    mid = start + (end - start) / 2
+    return mid.strftime("%Y-%m-%d")
+
+
+def next_day(date_str: str) -> str:
+    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    return (d + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def seed_count(
+    session: requests.Session,
+    base: str,
+    database_id: str,
+    usr_query: str,
+    start_date: str | None,
+    end_date: str | None,
+):
+    seed_params = {
+        "databaseId": database_id,
+        "usrQuery": usr_query,
+        "count": 0,
+        "firstRecord": 1,
+        "optionView": "SR",
+    }
+
+    if start_date and end_date:
+        seed_params["publishTimeSpan"] = f"{start_date}+{end_date}"
+
+    seed_json = get_json_with_retry(session, base, params=seed_params)
+    query_id, total_found = get_query_id_and_total(seed_json)
+    return query_id, total_found
+
+
+def fetch_this_range(
+    session: requests.Session,
+    base: str,
+    usr_query: str,
+    database_id: str,
+    start_date: str | None,
+    end_date: str | None,
+    page_size: int,
+    total_limit: int | None,
+    save_debug_first_page: bool,
+    debug_first_page: Path,
+    records_jsonl: Path,
+    summary_rows: list,
+    partial_csv: Path | None,
+    sleep_between_calls: float,
+):
+    query_id, total_found = seed_count(
+        session=session,
+        base=base,
+        database_id=database_id,
+        usr_query=usr_query,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    if total_found == 0:
+        return 0, 0
+
+    if not query_id:
+        raise RuntimeError("Seed response did not include a query_id / QueryID.")
+
+    if total_found > 100000:
+        raise RuntimeError(
+            f"Single range {start_date} to {end_date} still returned {total_found} records, "
+            f"which exceeds WoS paging limit."
+        )
+
+    total_to_fetch = total_found
+    if total_limit is not None:
+        total_to_fetch = min(total_to_fetch, total_limit - len(summary_rows))
+
+    if total_to_fetch <= 0:
+        return 0, 0
+
+    query_url = f"{base}/query/{query_id}"
+    fetched_count = 0
+    kept_count = 0
+
+    for first in range(1, total_to_fetch + 1, page_size):
+        if total_limit is not None and len(summary_rows) >= total_limit:
+            break
+
+        remaining = total_to_fetch - first + 1
+        if total_limit is not None:
+            remaining = min(remaining, total_limit - len(summary_rows))
+
+        batch = min(page_size, remaining)
+
+        params = {
+            "count": batch,
+            "firstRecord": first,
+            "optionView": "FR",
+            "links": "true",
+        }
+
+        data = get_json_with_retry(session, query_url, params=params)
+
+        if save_debug_first_page and first == 1 and not debug_first_page.exists():
+            debug_first_page.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        recs = extract_records_any(data)
+        if not recs:
+            raise RuntimeError(
+                f"No records extracted on page starting at firstRecord={first}. "
+                f"Check {debug_first_page} for schema."
+            )
+
+        for rec in recs:
+            if total_limit is not None and len(summary_rows) >= total_limit:
+                break
+
+            fetched_count += 1
+            row = make_summary_row(rec)
+
+            if start_date and end_date:
+                if not is_within_exact_date_range(row["SortDate"], start_date, end_date):
+                    continue
+
+            ut = get_unique_id(rec)
+            write_jsonl(records_jsonl, {"UT": ut, "record": rec})
+            summary_rows.append(row)
+            kept_count += 1
+
+        if partial_csv is not None:
+            pd.DataFrame(summary_rows).to_csv(partial_csv, index=False, encoding="utf-8")
+
+        print(
+            f" Range {start_date} -> {end_date} | "
+            f"Fetched: {fetched_count}/{total_to_fetch} | "
+            f"Kept: {kept_count}",
+            flush=True,
+        )
+        time.sleep(sleep_between_calls)
+
+    return fetched_count, kept_count
+
+
+def fetch_range(
+    session: requests.Session,
+    base: str,
+    usr_query: str,
+    database_id: str,
+    start_date: str,
+    end_date: str,
+    page_size: int,
+    save_debug_first_page: bool,
+    debug_first_page: Path,
+    records_jsonl: Path,
+    summary_rows: list,
+    partial_csv: Path | None,
+    sleep_between_calls: float,
+    total_limit: int | None = None,
+):
+    if total_limit is not None and len(summary_rows) >= total_limit:
+        return
+
+    _, total_found = seed_count(
+        session=session,
+        base=base,
+        database_id=database_id,
+        usr_query=usr_query,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    print(f"Checking range {start_date} -> {end_date} | total found = {total_found}")
+
+    if total_found == 0:
+        return
+
+    if total_found <= 100000:
+        fetch_this_range(
+            session=session,
+            base=base,
+            usr_query=usr_query,
+            database_id=database_id,
+            start_date=start_date,
+            end_date=end_date,
+            page_size=page_size,
+            total_limit=total_limit,
+            save_debug_first_page=save_debug_first_page,
+            debug_first_page=debug_first_page,
+            records_jsonl=records_jsonl,
+            summary_rows=summary_rows,
+            partial_csv=partial_csv,
+            sleep_between_calls=sleep_between_calls,
+        )
+        return
+
+    if start_date == end_date:
+        raise RuntimeError(
+            f"Even single day {start_date} returned more than 100000 records. "
+            f"Split query further using another condition."
+        )
+
+    mid = midpoint_date(start_date, end_date)
+
+    if mid == end_date:
+        raise RuntimeError(f"Could not split range further: {start_date} -> {end_date}")
+
+    fetch_range(
+        session=session,
+        base=base,
+        usr_query=usr_query,
+        database_id=database_id,
+        start_date=start_date,
+        end_date=mid,
+        page_size=page_size,
+        save_debug_first_page=save_debug_first_page,
+        debug_first_page=debug_first_page,
+        records_jsonl=records_jsonl,
+        summary_rows=summary_rows,
+        partial_csv=partial_csv,
+        sleep_between_calls=sleep_between_calls,
+        total_limit=total_limit,
+    )
+
+    right_start = next_day(mid)
+    if right_start <= end_date:
+        fetch_range(
+            session=session,
+            base=base,
+            usr_query=usr_query,
+            database_id=database_id,
+            start_date=right_start,
+            end_date=end_date,
+            page_size=page_size,
+            save_debug_first_page=save_debug_first_page,
+            debug_first_page=debug_first_page,
+            records_jsonl=records_jsonl,
+            summary_rows=summary_rows,
+            partial_csv=partial_csv,
+            sleep_between_calls=sleep_between_calls,
+            total_limit=total_limit,
+        )
+
 
 def run_fetch_query(
     usr_query: str,
@@ -446,11 +777,11 @@ def run_fetch_query(
         raise ValueError("sleep_between_calls must be 0 or greater.")
     if max_records is not None and max_records <= 0:
         raise ValueError("max_records must be greater than 0 when provided.")
-    
+
     validate_date_range(start_date, end_date)
 
     api_key = get_wos_api_key()
-    
+
     base = "https://api.clarivate.com/api/wos"
     headers = {"X-ApiKey": api_key, "Accept": "application/json"}
     ensure_dir(out_dir)
@@ -460,89 +791,82 @@ def run_fetch_query(
     if summary_csv is None:
         summary_csv = out_dir / "wos_results.csv"
 
-    partial_csv = out_dir / "wos_results.partial.csv" 
+    partial_csv = out_dir / "wos_results.partial.csv"
 
     if records_jsonl.exists():
         records_jsonl.unlink()
 
     if partial_csv.exists():
         partial_csv.unlink()
-    
+
     if debug_first_page.exists():
         debug_first_page.unlink()
-    summary_rows = []
-    fetched_count = 0
-    seed_params = {
-        "databaseId": database_id,
-        "usrQuery": usr_query,
-        "count": 0,
-        "firstRecord": 1,
-        "optionView": "SR",
-    }
 
-    if start_date and end_date:
-        seed_params["publishTimeSpan"] = f"{start_date}+{end_date}"
+    summary_rows = []
 
     with requests.Session() as session:
         session.headers.update(headers)
 
         print(f"Seed query: {usr_query}")
-        if "publishTimeSpan" in seed_params:
-            print(f"Time span: {seed_params['publishTimeSpan']}")
-        
-        seed_json = get_json_with_retry(session, base, params=seed_params)
-        query_id, total_found = get_query_id_and_total(seed_json)
 
-        print(f"Total found: {total_found}")
-        if total_found == 0:
-            pd.DataFrame().to_csv(summary_csv, index=False, encoding="utf-8")
-            return {"out_dir": out_dir, "summary_csv": summary_csv}
+        if start_date and end_date:
+            print(f"Time span: {start_date}+{end_date}")
+            fetch_range(
+                session=session,
+                base=base,
+                usr_query=usr_query,
+                database_id=database_id,
+                start_date=start_date,
+                end_date=end_date,
+                page_size=page_size,
+                save_debug_first_page=save_debug_first_page,
+                debug_first_page=debug_first_page,
+                records_jsonl=records_jsonl,
+                summary_rows=summary_rows,
+                partial_csv=partial_csv,
+                sleep_between_calls=sleep_between_calls,
+                total_limit=max_records,
+            )
+        else:
+            query_id, total_found = seed_count(
+                session=session,
+                base=base,
+                database_id=database_id,
+                usr_query=usr_query,
+                start_date=None,
+                end_date=None,
+            )
 
-        if not query_id:
-            raise RuntimeError("Seed response did not include a query_id / QueryID.")
+            print(f"Total found: {total_found}")
 
-        total_to_fetch = min(total_found, max_records) if max_records else total_found
-        print(f"Fetching {total_to_fetch} record(s) using Full Record (FR) view...")
+            if total_found == 0:
+                pd.DataFrame().to_csv(summary_csv, index=False, encoding="utf-8")
+                return {"out_dir": out_dir, "summary_csv": summary_csv}
 
-        query_url = f"{base}/query/{query_id}"
-
-        for first in range(1, total_to_fetch + 1, page_size):
-            batch = min(page_size, total_to_fetch - first + 1)
-
-            params = {
-                "count": batch,
-                "firstRecord": first,
-                "optionView": "FR",
-                "links": "true",
-            }
-
-            data = get_json_with_retry(session, query_url, params=params)
-            
-            if save_debug_first_page and first == 1:
-                debug_first_page.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-            recs = extract_records_any(data)
-            if not recs:
+            if total_found > 100000:
                 raise RuntimeError(
-                    f"No records extracted on page starting at firstRecord={first}. "
-                    f"Check {debug_first_page} for schema."
+                    "Query returned more than 100000 records without a date range. "
+                    "Please provide start_date and end_date so the query can be split automatically."
                 )
 
-            for rec in recs:
-                fetched_count += 1
-                row = make_summary_row(rec)
+            fetch_this_range(
+                session=session,
+                base=base,
+                usr_query=usr_query,
+                database_id=database_id,
+                start_date=None,
+                end_date=None,
+                page_size=page_size,
+                total_limit=max_records,
+                save_debug_first_page=save_debug_first_page,
+                debug_first_page=debug_first_page,
+                records_jsonl=records_jsonl,
+                summary_rows=summary_rows,
+                partial_csv=partial_csv,
+                sleep_between_calls=sleep_between_calls,
+            )
 
-                if start_date and end_date:
-                    if not is_within_exact_date_range(row["SortDate"], start_date, end_date):
-                        continue
-
-                ut = get_unique_id(rec)
-                write_jsonl(records_jsonl, {"UT": ut, "record": rec})
-                summary_rows.append(row)
-
-            pd.DataFrame(summary_rows).to_csv(partial_csv, index=False, encoding="utf-8")
-            print(f" Fetched: {fetched_count}/{total_to_fetch} | Kept: {len(summary_rows)}", flush=True)
-            time.sleep(sleep_between_calls)
+        pd.DataFrame(summary_rows).to_csv(partial_csv, index=False, encoding="utf-8")
 
     df = pd.DataFrame(summary_rows)
     df.to_csv(summary_csv, index=False, encoding="utf-8")
@@ -558,7 +882,6 @@ def run_fetch_query(
     return {"summary_csv": summary_csv}
 
 
-
 def build_argparser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--usr-query", required=True)
@@ -569,8 +892,8 @@ def build_argparser():
     ap.add_argument("--sleep", type=float, default=0.25)
     ap.add_argument("--no-debug-first-page", action="store_true")
     ap.add_argument("--summary-csv", default="")
-    ap.add_argument("--start-date", default=None)  # YYYY-MM-DD
-    ap.add_argument("--end-date", default=None)    
+    ap.add_argument("--start-date", default=None)
+    ap.add_argument("--end-date", default=None)
     return ap
 
 
