@@ -79,6 +79,19 @@ def helpers(os, subprocess):
                 return f.name, f.contents
         return None, None
 
+    def get_widget_files(widget_object):
+        files = widget_object.value
+        out = []
+
+        if not files:
+            return out
+
+        for f in files:
+            if hasattr(f, "name") and hasattr(f, "contents"):
+                out.append((f.name, f.contents))
+
+        return out
+
     def pid_is_running(pid):
         if pid is None:
             return False
@@ -98,8 +111,7 @@ def helpers(os, subprocess):
         except Exception:
             return False
 
-    return get_widget_content, pid_is_running
-
+    return get_widget_content, get_widget_files, pid_is_running
 
 @app.cell
 def advanced_controls(advanced_open, mo, set_advanced_open):
@@ -158,8 +170,8 @@ def ui_elements(mo):
 
     wos_csv_upload = mo.ui.file(
         kind="button",
-        filetypes=[".csv", ".tsv"],
-        label="WoS Results (csv)",
+        filetypes=[".csv", ".tsv", ".xlsx", ".xls"],
+        label="WoS Results",
         max_size=MAX_UPLOAD,
     )
     keywords_upload = mo.ui.file(
@@ -217,19 +229,34 @@ def ui_elements(mo):
     fetch_run_btn = mo.ui.run_button(label="Run Fetch", kind="success")
     filter_run_btn = mo.ui.run_button(label="Run Filter", kind="success")
     stop_run_btn = mo.ui.run_button(label="Stop Run", kind="danger")
-    auto_refresh = mo.ui.refresh(default_interval="1s", label="")
-    fuzzy_threshold = mo.ui.slider(
-        start=80, 
-        stop=100, 
-        step=1, 
-        value=95, 
-        label="Fuzzy Threshold (%)"
+    auto_refresh = mo.ui.refresh(default_interval="5s", label="")
+    compare_wos_upload = mo.ui.file(
+        kind="button",
+        filetypes=[".csv", ".tsv", ".xlsx", ".xls"],
+        label="Filtered / merged WoS result",
+        max_size=MAX_UPLOAD,
     )
 
+    manual_compare_upload = mo.ui.file(
+        kind="button",
+        filetypes=[".csv", ".tsv", ".xlsx", ".xls"],
+        label="Manual publication file(s)",
+        max_size=MAX_UPLOAD,
+        multiple=True,
+    )
+
+    compare_year_window = mo.ui.number(
+        label="Accept WoS year up to N years after manual year",
+        value=1,
+    )
+
+    compare_run_btn = mo.ui.run_button(
+        label="Run Compare",
+        kind="success",
+    )
     return (
         Contributor_header,
         Contributor_upload,
-        fuzzy_threshold,
         FETCH_LABEL_TO_CODE,
         do_keyword_filter,
         do_keyword_filter_row,
@@ -254,6 +281,10 @@ def ui_elements(mo):
         use_cache,
         usr_query,
         wos_csv_upload,
+        compare_wos_upload,
+        manual_compare_upload,
+        compare_year_window,
+        compare_run_btn,
     )
 
 
@@ -264,8 +295,8 @@ def main_layout(
     advanced_btn,
     advanced_open,
     auto_refresh,
+    is_running,
     do_keyword_filter_row,
-    fuzzy_threshold,
     do_Contributor_check_row,
     do_merge_results_row,
     doi_header,
@@ -287,6 +318,10 @@ def main_layout(
     use_cache,
     usr_query,
     wos_csv_upload,
+    compare_wos_upload,
+    manual_compare_upload,
+    compare_year_window,
+    compare_run_btn,
 ):
     _advanced_panel = (
         mo.vstack(
@@ -359,27 +394,53 @@ def main_layout(
         gap=0.5,
     )
 
+    _compare_panel = mo.vstack(
+        [
+            mo.md("**Compare manually collected publication files against filtered WoS results.**"),
+            compare_wos_upload,
+            manual_compare_upload,
+            compare_year_window,
+            mo.md("---"),
+            mo.hstack([compare_run_btn, stop_run_btn], justify="end", gap=0.5),
+        ],
+        gap=0.5,
+    )
+
     _main_tabs = mo.ui.tabs(
         {
             "Fetch": _fetch_panel,
             "Filter": _filter_panel,
+            "Compare": _compare_panel,
         },
         value=selected_tab(),
         on_change=set_selected_tab,
     )
+    
+    _hidden_refresh = (
+    mo.md(f"<div style='display:none'>{auto_refresh}</div>")
+    if is_running()
+    else mo.md("")
+    )
 
-    _hidden_refresh = mo.md(f"<div style='display:none'>{auto_refresh}</div>")
+    _cache_control = (
+        mo.vstack(
+            [
+                mo.md("---"),
+                use_cache,
+            ]
+        )
+        if selected_tab() in ["Fetch", "Filter"]
+        else mo.md("")
+    )
 
     app_ui = mo.vstack(
         [
             mo.center(mo.md("# Article Finder")),
             _main_tabs,
-            mo.md("---"),
-            use_cache,
+            _cache_control,
             _hidden_refresh,
         ]
     )
-
     return app_ui
 
 
@@ -503,7 +564,6 @@ def run_fetch_logic(
     start_day_month_year,
     use_cache,
     usr_query,
-    fuzzy_threshold,
 ):
     mo.stop(not fetch_run_btn.value)
 
@@ -563,7 +623,6 @@ def run_fetch_logic(
         do_Contributor_check=False,
         do_merge_results=False,
         Contributor_csv=None,
-        fuzzy_threshold=int(fuzzy_threshold.value),
     )
 
     _fetch_pid, _fetch_manifest_path, _fetch_log_path = launch_config(_cfg)
@@ -664,6 +723,95 @@ def run_filter_logic(
     print(f"Started {_current_run_mode.value} with PID {_filter_pid}")
     print(f"Manifest path: {_filter_manifest_path}")
     print(f"Log path: {_filter_log_path}")
+
+@app.cell
+def run_compare_logic(
+    Mode,
+    Path,
+    PipelineConfig,
+    compare_run_btn,
+    compare_wos_upload,
+    compare_year_window,
+    get_widget_content,
+    get_widget_files,
+    is_running,
+    launch_config,
+    manual_compare_upload,
+    mo,
+    page_size,
+    pid_is_running,
+    runner_pid,
+    set_is_running,
+    set_runner_pid,
+    sleep,
+    time,
+):
+    mo.stop(not compare_run_btn.value)
+
+    _existing_pid = runner_pid()
+    if is_running():
+        if _existing_pid is not None and pid_is_running(_existing_pid):
+            mo.stop(True)
+        else:
+            set_is_running(False)
+            set_runner_pid(None)
+
+    _current_run_mode = Mode("compare")
+
+    _upload_dir = Path("runs") / "_uploads"
+    _upload_dir.mkdir(parents=True, exist_ok=True)
+
+    _w_n, _w_c = get_widget_content(compare_wos_upload)
+    if not _w_n:
+        raise ValueError("Upload a filtered WoS file or merged result file.")
+
+    _p_w = _upload_dir / f"compare_wos_{Path(_w_n).name}"
+    _p_w.write_bytes(_w_c)
+    _compare_wos_path = str(_p_w)
+
+    _manual_files = []
+
+    _uploaded_manual_files = get_widget_files(manual_compare_upload)
+
+    if not _uploaded_manual_files:
+        raise ValueError("Upload manual publication file(s).")
+
+    for _name, _contents in _uploaded_manual_files:
+        _p_m = _upload_dir / f"manual_{Path(_name).name}"
+        _p_m.write_bytes(_contents)
+        _manual_files.append(str(_p_m))
+
+    _cfg = PipelineConfig(
+        mode=_current_run_mode,
+        run_uid=str(time.time_ns()),
+        use_cache=False,
+        page_size=int(page_size.value),
+        sleep=float(sleep.value),
+
+        compare_wos_file=_compare_wos_path,
+        manual_dir=None,
+        manual_files=_manual_files,
+        compare_title_threshold=90,
+        compare_year_window=int(compare_year_window.value),
+
+        usr_query=None,
+        max_records=None,
+        start_date=None,
+        end_date=None,
+        doi_list_path=None,
+        input_wos_csv=None,
+        keywords_yml=None,
+        do_keyword_filter=True,
+        do_Contributor_check=False,
+        do_merge_results=False,
+        Contributor_csv=None,
+    )
+
+    _compare_pid, _compare_manifest_path, _compare_log_path = launch_config(_cfg)
+
+    print(f"Started {_current_run_mode.value} with PID {_compare_pid}")
+    print(f"Manifest path: {_compare_manifest_path}")
+    print(f"Log path: {_compare_log_path}")
 
 @app.cell
 def stop_logic(
@@ -790,7 +938,7 @@ def results_ui(
             if isinstance(_obj, dict):
                 if _obj.get("type") == "log" and "line" in _obj:
                     _progress_lines.append(_obj["line"])
-                elif _obj.get("type") in {"fetch_query_start", "fetch_query_done", "fetch_doi_start", "fetch_doi_done", "filter_start", "filter_done"}:
+                elif _obj.get("type") in {"fetch_query_start", "fetch_query_done", "fetch_doi_start", "fetch_doi_done", "filter_start", "filter_done", "compare_start", "compare_done"}:
                     _etype = _obj.get("type", "")
                     _progress_lines.append(f"[{_etype}]")
         except Exception:
@@ -825,6 +973,7 @@ def results_ui(
             ("keyword_filtered_csv", "Keyword Results"),
             ("name_checked_csv", "Name Results"),
             ("merged_csv", "Merged Results"),
+            ("compare_csv", "Compare Result"),
         ]:
             if _arts.get(_k):
                 _res_lines.append(f"- **{_l}:** `{_arts[_k]}`")
@@ -854,6 +1003,8 @@ def results_ui(
             _tabs["Merged Results"] = _get_preview(_arts["merged_csv"])
         if _arts.get("output_csv"):
             _tabs["Full Result"] = _get_preview(_arts["output_csv"])
+        if _arts.get("compare_csv"):
+            _tabs["Compare Result"] = _get_preview(_arts["compare_csv"])
 
         _result_display = mo.vstack(
             [

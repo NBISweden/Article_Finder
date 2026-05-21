@@ -16,12 +16,13 @@ class Mode(str, Enum):
     FETCH_QUERY = "fetch_query"
     FETCH_DOI = "fetch_doi"
     FILTER = "filter"
+    COMPARE = "compare"   
 
 
 @dataclass(frozen=True)
 class PipelineConfig:
     mode: Mode
-
+    run_uid: str | None = None
     runs_dir: str = "runs"
     use_cache: bool = True
     sleep: float = 0.25
@@ -45,6 +46,13 @@ class PipelineConfig:
     do_Contributor_check: bool = True
     do_merge_results: bool = False
     fuzzy_threshold: int = 95
+
+    # Mode 4: Compare manual files against filtered WoS
+    compare_wos_file: str | None = None
+    manual_dir: str | None = None
+    manual_files: list[str] | None = None
+    compare_title_threshold: int = 90
+    compare_year_window: int = 1
 
 
 def _utc_now() -> str:
@@ -103,6 +111,7 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path) -> dict:
     filtered_csv = run_dir / "filtered_results.csv"
     Contributor_checked_csv = run_dir / "Contributor_names_checked.csv"
     merged_csv = run_dir / "merged_results.csv"
+    compare_csv = run_dir / "manual_vs_filtered_wos_comparison.csv"
 
     artifacts = {
         "run_dir": str(run_dir),
@@ -222,6 +231,60 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path) -> dict:
             artifacts["merged_csv"] = str(merged_csv)
 
         emit("filter_done", filtered_csv=str(filtered_csv) if cfg.do_keyword_filter else "")
+    
+    elif cfg.mode == Mode.COMPARE:
+        if not cfg.compare_wos_file:
+            raise ValueError("COMPARE mode requires 'compare_wos_file'.")
+
+        if not cfg.manual_dir and not cfg.manual_files:
+            raise ValueError("COMPARE mode requires either 'manual_dir' or 'manual_files'.")
+
+        compare_wos_path = Path(cfg.compare_wos_file).resolve()
+        if not compare_wos_path.exists():
+            raise FileNotFoundError(f"Compare WoS file not found: {compare_wos_path}")
+
+        manual_files_resolved = []
+        if cfg.manual_files:
+            for f in cfg.manual_files:
+                p = Path(f).resolve()
+                if not p.exists():
+                    raise FileNotFoundError(f"Manual file not found: {p}")
+                manual_files_resolved.append(str(p))
+
+        manual_dir_resolved = None
+        if cfg.manual_dir:
+            p = Path(cfg.manual_dir).resolve()
+            if not p.exists():
+                raise FileNotFoundError(f"Manual directory not found: {p}")
+            manual_dir_resolved = str(p)
+
+        emit(
+            "compare_start",
+            compare_wos_file=str(compare_wos_path),
+            manual_dir=manual_dir_resolved or "",
+            manual_files=manual_files_resolved,
+        )
+
+        compare_cmd = [
+            sys.executable,
+            str(repo_root / "scripts" / "compare_manual_against_filtered_wos.py"),
+            "--wos-filtered", str(compare_wos_path),
+            "--out-dir", str(run_dir),
+            "--title-threshold", str(cfg.compare_title_threshold),
+            "--year-window", str(cfg.compare_year_window),
+        ]
+
+        if manual_dir_resolved:
+            compare_cmd += ["--manual-dir", manual_dir_resolved]
+
+        if manual_files_resolved:
+            compare_cmd += ["--manual-files"] + manual_files_resolved
+
+        _stream_cmd(compare_cmd, cwd=repo_root, on_line=lambda s: emit("log", line=s))
+
+        artifacts["compare_csv"] = str(compare_csv)
+
+        emit("compare_done", csv=str(compare_csv))
 
     else:
         raise ValueError(f"Unknown mode: {cfg.mode}")
