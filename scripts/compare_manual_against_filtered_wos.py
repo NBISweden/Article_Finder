@@ -485,6 +485,7 @@ def run_check(
     }
 
     results = []
+    matched_wos_indices = set()
 
     for _, row in manual.iterrows():
         manual_doi = clean_text(row.get("manual_doi_norm", ""))
@@ -512,6 +513,8 @@ def run_check(
 
         matched = matched_idx is not None
         wos_row = wos.loc[matched_idx] if matched else None
+        if matched:
+            matched_wos_indices.add(int(matched_idx))
 
         out = {col: clean_text(row.get(col, "")) for col in original_cols}
         out["matched_in_wos"] = matched
@@ -522,18 +525,32 @@ def run_check(
         out["wos_match_year"] = get_value(wos_row, wos_cols["year"]) if matched else ""
 
         results.append(out)
-
     result_df = pd.DataFrame(results)
 
     compare_out = out_path / "manual_vs_filtered_wos_comparison.csv"
     result_df.to_csv(compare_out, index=False, encoding="utf-8-sig")
 
+    wos_missing_from_manual = wos.drop(index=list(matched_wos_indices)).copy()
+
+    helper_cols = ["__doi_norm", "__title_norm", "__year_int"]
+    wos_missing_from_manual = wos_missing_from_manual.drop(
+        columns=[c for c in helper_cols if c in wos_missing_from_manual.columns],
+        errors="ignore"
+    )
+
+    wos_missing_out = out_path / "filtered_wos_missing_from_manual_comparison.csv"
+    wos_missing_from_manual.to_csv(wos_missing_out, index=False, encoding="utf-8-sig")
+
+
     print("\nDone.")
     print(f"Manual rows checked: {len(result_df)}")
-    print(f"Available in filtered WoS: {int(result_df['matched_in_wos'].sum())}")
-    print(f"Not available in filtered WoS: {int((~result_df['matched_in_wos']).sum())}")
+    print(f"Manual rows found in filtered WoS: {int(result_df['matched_in_wos'].sum())}")
+    print(f"Manual rows missing from filtered WoS: {int((~result_df['matched_in_wos']).sum())}")
+    print(f"Filtered WoS rows missing from manual: {len(wos_missing_from_manual)}")
     print()
-    print(f"Saved comparison file: {compare_out}")
+    print(f"Saved manual comparison file: {compare_out}")
+    print(f"Saved WoS missing-from-manual file: {wos_missing_out}")
+
 
 
 def build_argparser():

@@ -973,7 +973,8 @@ def results_ui(
             ("keyword_filtered_csv", "Keyword Results"),
             ("name_checked_csv", "Name Results"),
             ("merged_csv", "Merged Results"),
-            ("compare_csv", "Compare Result"),
+            ("compare_csv", "Manual vs Filtered WoS"),
+            ("wos_missing_from_manual_csv", "Filtered WoS Missing From Manual"),
         ]:
             if _arts.get(_k):
                 _res_lines.append(f"- **{_l}:** `{_arts[_k]}`")
@@ -1004,7 +1005,11 @@ def results_ui(
         if _arts.get("output_csv"):
             _tabs["Full Result"] = _get_preview(_arts["output_csv"])
         if _arts.get("compare_csv"):
-            _tabs["Compare Result"] = _get_preview(_arts["compare_csv"])
+            _tabs["Manual vs Filtered WoS"] = _get_preview(_arts["compare_csv"])
+        if _arts.get("wos_missing_from_manual_csv"):
+            _tabs["Filtered WoS Missing From Manual"] = _get_preview(
+                _arts["wos_missing_from_manual_csv"]
+            )
 
         _result_display = mo.vstack(
             [

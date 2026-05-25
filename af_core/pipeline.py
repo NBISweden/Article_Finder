@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 from dataclasses import dataclass, asdict
@@ -112,6 +111,7 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path) -> dict:
     Contributor_checked_csv = run_dir / "Contributor_names_checked.csv"
     merged_csv = run_dir / "merged_results.csv"
     compare_csv = run_dir / "manual_vs_filtered_wos_comparison.csv"
+    wos_missing_compare_csv = run_dir / "filtered_wos_missing_from_manual_comparison.csv"
 
     artifacts = {
         "run_dir": str(run_dir),
@@ -149,6 +149,7 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path) -> dict:
                 cmd += ["--max-records", str(cfg.max_records)]
 
             _stream_cmd(cmd, cwd=repo_root, on_line=lambda s: emit("log", line=s))
+           
             emit("fetch_query_done", csv=str(fetched_csv_query))
 
         artifacts["output_csv"] = str(fetched_csv_query)
@@ -281,10 +282,16 @@ def run_pipeline(cfg: PipelineConfig, repo_root: Path) -> dict:
             compare_cmd += ["--manual-files"] + manual_files_resolved
 
         _stream_cmd(compare_cmd, cwd=repo_root, on_line=lambda s: emit("log", line=s))
+        if not compare_csv.exists():
+            raise FileNotFoundError(f"Expected manual comparison output was not created: {compare_csv}")
 
+        if not wos_missing_compare_csv.exists():
+            raise FileNotFoundError(f"Expected filtered-WoS-missing-from-manual output was not created: {wos_missing_compare_csv}")  
+              
         artifacts["compare_csv"] = str(compare_csv)
+        artifacts["wos_missing_from_manual_csv"] = str(wos_missing_compare_csv)
 
-        emit("compare_done", csv=str(compare_csv))
+        emit("compare_done", csv=str(compare_csv), wos_missing_from_manual_csv=str(wos_missing_compare_csv))
 
     else:
         raise ValueError(f"Unknown mode: {cfg.mode}")
