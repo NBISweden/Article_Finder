@@ -40,7 +40,7 @@ jobs:
           print('Test inputs copied OK');"
 
       - name: Run script on test dataset
-        run: pixi run python src/filter_wos_records_category.py
+        run: pixi run python scripts/filter_wos_records.py
 
       - name: Verify outputs were created
         run: >
